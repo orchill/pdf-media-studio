@@ -1,0 +1,15 @@
+# PDF & Media Studio - backend dependencies
+# Python 3.10+ required (tested on 3.12)
+
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+python-multipart>=0.0.9,<1.0
+pydantic>=2.7,<3.0
+
+# PDF processing
+PyMuPDF>=1.24.9,<2.0        # AGPL-3.0: rendering, page edits, image extraction, compression
+pypdf>=4.2,<7.0             # BSD-3: merge / split structural operations
+Pillow>=10.4,<12.0          # MIT-CMU: image loading, conversion, thumbnails
+
+# Media downloading (CLI executed as a controlled subprocess: python -m yt_dlp)
+yt-dlp>=2024.12.13

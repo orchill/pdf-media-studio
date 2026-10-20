@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Runtime data (uploads cache, thumbnails, logs, history)
+# NEVER commit these: data/ holds your real YouTube cookies (data/cookies.txt)
+data/
+outputs/
+config.json
+.env
+cookies*.txt
+*.cookies
+
+# Frontend build deps are installed per machine; the built dist/ IS shipped
+# so users without Node.js can still run the app.
+node_modules/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
