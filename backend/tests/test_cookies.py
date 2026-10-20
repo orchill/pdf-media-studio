@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import http.server
+import json
 import math
 import pathlib
 import socket
@@ -28,8 +29,8 @@ def _test_cfg(name: str) -> Config:
     d = TMP / name
     d.mkdir(exist_ok=True)
     f = d / "config.json"
-    f.write_text('{"output_dir": "%s", "data_dir": "%s"}'
-                 % (d / "out", d / "data"), encoding="utf-8")
+    f.write_text(json.dumps({"output_dir": str(d / "out"),
+                             "data_dir": str(d / "data")}), encoding="utf-8")
     return Config(f)
 
 

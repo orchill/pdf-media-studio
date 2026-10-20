@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from pathlib import Path
 
 import fitz
@@ -55,6 +56,18 @@ def get_upload(file_id: str) -> Sidecar:
         raise HTTPException(500, "Upload metadata is corrupted")
 
 
+def _discard(path: Path) -> None:
+    """Best-effort delete; on Windows a just-closed handle may lag briefly."""
+    for attempt in range(3):
+        try:
+            path.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            time.sleep(0.05 * (attempt + 1))
+        except OSError:
+            return
+
+
 def upload_path(meta: Sidecar) -> Path:
     p = get_config().uploads_dir / f"{meta.data['id']}.bin"
     if not p.exists():
@@ -89,24 +102,26 @@ async def upload(request: Request, files: list[UploadFile] = File(...)):
                     break
                 out.write(chunk)
         if too_big:
-            dest.unlink(missing_ok=True)
+            _discard(dest)
             raise HTTPException(413, f"'{raw_name}' exceeds the {cfg.get('max_upload_mb')} MB upload limit")
 
-        # probe content (never trust extensions)
+        # probe content (never trust extensions). filetype="pdf" is required:
+        # the stored name is {id}.bin and PyMuPDF sniffs the extension first.
+        # It also avoids the Windows handle leak a failed plain open can leave.
         with dest.open("rb") as fh:
             head = fh.read(2048)
         meta: dict
         if head.startswith(b"%PDF-"):
             try:
-                doc = fitz.open(str(dest))
+                doc = fitz.open(str(dest), filetype="pdf")
                 pages = doc.page_count
                 enc = bool(doc.needs_pass)
                 doc.close()
             except Exception:
-                dest.unlink(missing_ok=True)
+                _discard(dest)
                 raise HTTPException(415, f"'{raw_name}' is not a readable PDF (corrupted?)")
             if enc:
-                dest.unlink(missing_ok=True)
+                _discard(dest)
                 raise HTTPException(415, f"'{raw_name}' is password-protected")
             meta = {"kind": "pdf", "pages": pages, "format": "PDF"}
         else:
@@ -117,8 +132,8 @@ async def upload(request: Request, files: list[UploadFile] = File(...)):
                     width, height = im.size
                     if fmt not in IMAGE_FORMATS:
                         raise UnidentifiedImageError()
-            except (UnidentifiedImageError, Exception):
-                dest.unlink(missing_ok=True)
+            except Exception:
+                _discard(dest)
                 raise HTTPException(415, f"'{raw_name}' is not a supported image "
                                          f"(PNG, JPEG, WebP, GIF, BMP, TIFF)")
             meta = {"kind": "image", "pages": 1, "format": fmt,

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import http.server
+import json
 import pathlib
 import shutil
 import socket
@@ -41,6 +42,21 @@ def _ffmpeg(*args: str) -> None:
                    check=True, capture_output=True)
 
 
+def _make_wav(path: pathlib.Path, seconds: float = 1.0, rate: int = 8000) -> None:
+    """Synthesize a valid WAV without ffmpeg (stdlib only)."""
+    import math
+    import struct
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        frames = bytearray()
+        for i in range(int(rate * seconds)):
+            frames += struct.pack("<h", int(9000 * math.sin(2 * math.pi * 440 * i / rate)))
+        w.writeframes(bytes(frames))
+
+
 @pytest.fixture(scope="module")
 def media_server():
     """Serve generated media files over local HTTP."""
@@ -56,6 +72,8 @@ def media_server():
                 "-f", "lavfi", "-i", "sine=frequency=300:duration=2",
                 "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac",
                 "-shortest", str(mp4))
+    else:
+        _make_wav(wav)  # metadata/cancel tests stay meaningful without ffmpeg
     if not big.exists():
         big.write_bytes(b"\x5a" * (48 * 1024 * 1024))  # 48 MB for cancel test
 
@@ -72,8 +90,9 @@ def _test_cfg(tmp_name: str) -> Config:
     cfg_dir = TMP / tmp_name
     cfg_dir.mkdir(exist_ok=True)
     cfg_file = cfg_dir / "config.json"
-    cfg_file.write_text('{"output_dir": "%s", "data_dir": "%s"}'
-                        % (cfg_dir / "out", cfg_dir / "data"), encoding="utf-8")
+    cfg_file.write_text(json.dumps({"output_dir": str(cfg_dir / "out"),
+                                    "data_dir": str(cfg_dir / "data")}),
+                        encoding="utf-8")
     return Config(cfg_file)
 
 

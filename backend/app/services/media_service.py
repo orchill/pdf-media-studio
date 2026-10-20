@@ -430,9 +430,14 @@ async def download_task(rec: TaskRecord, cfg: Config, params: dict) -> dict:
     try:
         await proc.wait()
     except asyncio.CancelledError:
-        # user cancellation -> hard kill, then re-raise
+        # user cancellation -> hard kill, then re-raise. Reap the process
+        # afterwards: on Windows the .part file handle lingers until exit.
         try:
             proc.kill()
+        except Exception:
+            pass
+        try:
+            await proc.wait()
         except Exception:
             pass
         raise
@@ -448,14 +453,19 @@ async def download_task(rec: TaskRecord, cfg: Config, params: dict) -> dict:
                 pass
         rec.process = None
         # cleanup partial files for cancelled/failed downloads
-        if rec.status in ("cancelled", "failed", "running") or proc.returncode != 0:
-            if rec.cancel_event.is_set() or proc.returncode != 0:
-                for pf in out_dir.glob("*.part"):
-                    try:
-                        if pf.stat().st_mtime >= started:
+        if rec.cancel_event.is_set() or proc.returncode != 0:
+            for pf in out_dir.glob("*.part"):
+                try:
+                    if pf.stat().st_mtime < started:
+                        continue
+                    for attempt in range(3):
+                        try:
                             pf.unlink()
-                    except OSError:
-                        pass
+                            break
+                        except PermissionError:
+                            await asyncio.sleep(0.05 * (attempt + 1))
+                except OSError:
+                    pass
 
     if rec.cancel_event.is_set():
         raise TaskCancelled("Cancelled by user")

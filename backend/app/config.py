@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any
@@ -73,7 +74,9 @@ class Config:
         if self.path.exists():
             try:
                 raw = json.loads(self.path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                print(f"[warn] {self.path.name} is unreadable ({exc.__class__.__name__}: "
+                      f"{exc}) - using default settings", file=sys.stderr)
                 raw = {}
             if isinstance(raw, dict):
                 for key in DEFAULTS:

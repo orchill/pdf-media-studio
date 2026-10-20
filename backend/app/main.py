@@ -98,7 +98,8 @@ async def validation_handler(_req: Request, exc: ValidationError):
 @app.exception_handler(Exception)
 async def unhandled_handler(_req: Request, exc: Exception):
     log.exception("Unhandled error: %s", exc)
-    return JSONResponse(status_code=500, content={"detail": f"Internal error: {exc}"})
+    return JSONResponse(status_code=500, content={
+        "detail": "Internal server error - the details were written to data/logs/app.log"})
 
 
 # Serve the built React UI (frontend/dist). API routes are registered above
