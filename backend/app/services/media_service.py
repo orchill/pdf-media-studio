@@ -66,7 +66,15 @@ FRIENDLY_ERRORS: list[tuple[str, str]] = [
     ("failed to decrypt", "Could not decrypt the browser's cookies on this system. Use "
                           "'Paste cookies file' in the Cookies / Sign-in tab instead."),
     ("no cookies exist", "No cookies were found for that browser profile - sign in to "
-                         "YouTube in that browser first, or use 'Paste cookies file'."),
+                          "YouTube in that browser first, or use 'Paste cookies file'."),
+    ("page needs to be reloaded",
+     "YouTube is challenging this sign-in session (a current YouTube change that "
+     "affects all downloaders). Re-export fresh cookies: in your browser, sign out "
+     "of YouTube, sign back in, then export and paste cookies immediately. Public "
+     "videos still download without sign-in."),
+    ("no video formats found",
+     "YouTube returned no downloadable formats for this request. Try updating "
+     "yt-dlp, re-exporting fresh cookies, or clearing cookies for public videos."),
 ]
 
 
@@ -83,6 +91,19 @@ def _friendly(cfg: Config, stderr_tail: str) -> str:
         if ln.upper().startswith("ERROR:"):
             return ln[6:].strip()[:300]
     return (lines[-1][:300] if lines else "yt-dlp failed without an error message")
+
+
+# Errors that mean YouTube is rejecting the *saved session itself*, not the
+# request. When these appear while cookies are configured, retrying without
+# cookies rescues public content.
+_SESSION_BLOCK_MARKERS = ("page needs to be reloaded",
+                          "no video formats found",
+                          "sign in to confirm")
+
+
+def _session_challenged(stderr_tail: str) -> bool:
+    low = (stderr_tail or "").lower()
+    return any(m in low for m in _SESSION_BLOCK_MARKERS)
 
 
 # ------------------------------------------------------------- cookies
@@ -205,26 +226,39 @@ def _fmt_entry(f: dict) -> dict | None:
     }
 
 
-async def fetch_info(cfg: Config, url: str) -> dict:
-    """Run `yt-dlp -J` and return trimmed metadata for the UI."""
-    args = resolve_ytdlp_cmd(cfg) + [
-        "--dump-single-json", "--no-playlist", "--no-warnings",
-        "--socket-timeout", "20", "--retries", "2",
-    ] + cookie_args(cfg) + [url]
+async def _run_ytdlp(args: list[str], timeout: float) -> tuple[int, bytes, bytes]:
+    """Run yt-dlp and return (returncode, stdout, stderr)."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     except OSError as exc:
         raise RuntimeError(f"Could not start yt-dlp: {exc}")
     try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
-        raise RuntimeError("yt-dlp timed out while fetching video info (60s)")
-    if proc.returncode != 0:
-        tail = (stderr or b"").decode("utf-8", "replace")
+        raise RuntimeError(f"yt-dlp timed out after {timeout:.0f}s")
+    return proc.returncode or 0, stdout or b"", stderr or b""
+
+
+async def fetch_info(cfg: Config, url: str) -> dict:
+    """Run `yt-dlp -J` and return trimmed metadata for the UI."""
+    base_args = resolve_ytdlp_cmd(cfg) + [
+        "--dump-single-json", "--no-playlist", "--no-warnings",
+        "--socket-timeout", "20", "--retries", "2",
+    ]
+    cookies = cookie_args(cfg)
+    rc, stdout, stderr = await _run_ytdlp(base_args + cookies + [url], 60)
+    signed_out_fallback = False
+    if rc != 0 and cookies and _session_challenged(stderr.decode("utf-8", "replace")):
+        # YouTube sometimes challenges the saved sign-in session itself;
+        # retry anonymously so public content keeps working.
+        rc, stdout, stderr = await _run_ytdlp(base_args + [url], 60)
+        signed_out_fallback = rc == 0
+    if rc != 0:
+        tail = stderr.decode("utf-8", "replace")
         msg = _friendly(cfg, tail)
-        if "sign-in" in msg and not cookie_args(cfg):
+        if "sign-in" in msg and not cookies:
             msg += _BOT_TIP
         raise RuntimeError(msg)
     import json
@@ -256,6 +290,7 @@ async def fetch_info(cfg: Config, url: str) -> dict:
         "formats": formats[:80],
         "video_formats": videos[:40],
         "audio_formats": audios[:20],
+        "signed_out_fallback": signed_out_fallback,
     }
 
 
@@ -335,7 +370,7 @@ async def download_task(rec: TaskRecord, cfg: Config, params: dict) -> dict:
     if needs_ffmpeg:
         require_ffmpeg(cfg, "Audio conversion" if mode == "audio" else "Video merging")
 
-    args = resolve_ytdlp_cmd(cfg) + [
+    base_args = resolve_ytdlp_cmd(cfg) + [
         "--newline", "--no-playlist", "--no-warnings", "--no-overwrites",
         "--trim-filenames", "150",
         "--retries", "3", "--fragment-retries", "3", "--socket-timeout", "30",
@@ -347,136 +382,151 @@ async def download_task(rec: TaskRecord, cfg: Config, params: dict) -> dict:
     ]
     ffmpeg_path, _ = find_ffmpeg(cfg)
     if ffmpeg_path is not None:
-        args += ["--ffmpeg-location", str(ffmpeg_path)]
-    args += cookie_args(cfg)
+        base_args += ["--ffmpeg-location", str(ffmpeg_path)]
+    cookies = cookie_args(cfg)
     max_gb = int(cfg.get("max_download_gb") or 0)
     if max_gb > 0:
-        args += ["--max-filesize", f"{max_gb}g"]
+        base_args += ["--max-filesize", f"{max_gb}g"]
     max_hours = int(cfg.get("max_duration_hours") or 0)
     if max_hours > 0 and not params.get("is_live"):
         # '?' right after the operator = pass when the field is missing
-        args += ["--match-filters", f"duration<=?{max_hours * 3600}"]
-    args += _build_format_args(params, None)
-    args.append(url)
+        base_args += ["--match-filters", f"duration<=?{max_hours * 3600}"]
+    base_args += _build_format_args(params, None)
 
-    started = time.time()
-    rec.add_log("Command: " + " ".join(args[:6]) + " ... (URL omitted from log)")
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            cwd=str(out_dir))
-    except OSError as exc:
-        raise RuntimeError(f"Could not start yt-dlp: {exc}")
-    rec.process = proc
-
+    use_cookies = bool(cookies)
+    retried_anonymous = False
+    produced: list[Path] = []
     stderr_tail = ""
+    rc = 0
+    while True:
+        args = base_args + (cookies if use_cookies else []) + [url]
+        started = time.time()
+        rec.add_log("Command: " + " ".join(args[:6]) + " ... (URL omitted from log)")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                cwd=str(out_dir))
+        except OSError as exc:
+            raise RuntimeError(f"Could not start yt-dlp: {exc}")
+        rec.process = proc
 
-    async def pump_stderr():
-        nonlocal stderr_tail
-        assert proc.stderr is not None
-        while True:
-            raw = await proc.stderr.readline()
-            if not raw:
-                break
-            line = raw.decode("utf-8", "replace").rstrip()
-            stderr_tail = (stderr_tail + "\n" + line)[-4000:]
-            rec.add_log(line)
+        stderr_tail = ""
 
-    async def pump_stdout():
-        assert proc.stdout is not None
-        while True:
-            raw = await proc.stdout.readline()
-            if not raw:
-                break
-            line = raw.decode("utf-8", "replace").strip()
-            m = _DL_RE.match(line)
-            if m:
-                try:
-                    done = float(m.group(1)) if m.group(1) not in ("NA", "None", "") else None
-                    total_s, est_s, speed, eta = m.group(2), m.group(3), m.group(4), m.group(5)
-                except ValueError:
-                    continue
-                total = None
-                for cand in (total_s, est_s):
-                    try:
-                        if cand not in ("NA", "None", ""):
-                            total = float(cand)
-                            break
-                    except ValueError:
-                        continue
-                speed = speed if speed not in ("NA", "None") else None
-                eta = eta if eta not in ("NA", "None") else None
-                if done is not None and total:
-                    frac = max(0.0, min(1.0, done / total)) * 0.92
-                    rec.progress = frac
-                    pct = frac / 0.92 * 100
-                    rec.stage = f"Downloading {pct:.0f}% at {speed or '?'}" + (f", ETA {eta}s" if eta else "")
-                elif done is not None:
-                    rec.progress = None
-                    mb = done / 1e6
-                    rec.stage = f"Downloading {mb:.1f} MB at {speed or '?'} (size unknown)"
-                continue
-            m = _POST_RE.match(line)
-            if m:
-                name, status = m.group(1) or "Post-processing", m.group(2) or ""
-                rec.progress = max(rec.progress or 0, 0.93)
-                rec.stage = f"Processing ({name}) {status}".strip()
-                continue
-            if line and not line.startswith("[download]"):
+        async def pump_stderr():
+            nonlocal stderr_tail
+            assert proc.stderr is not None
+            while True:
+                raw = await proc.stderr.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").rstrip()
+                stderr_tail = (stderr_tail + "\n" + line)[-4000:]
                 rec.add_log(line)
 
-    out_task = asyncio.create_task(pump_stdout())
-    err_task = asyncio.create_task(pump_stderr())
-    try:
-        await proc.wait()
-    except asyncio.CancelledError:
-        # user cancellation -> hard kill, then re-raise. Reap the process
-        # afterwards: on Windows the .part file handle lingers until exit.
-        try:
-            proc.kill()
-        except Exception:
-            pass
+        async def pump_stdout():
+            assert proc.stdout is not None
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                m = _DL_RE.match(line)
+                if m:
+                    try:
+                        done = float(m.group(1)) if m.group(1) not in ("NA", "None", "") else None
+                        total_s, est_s, speed, eta = m.group(2), m.group(3), m.group(4), m.group(5)
+                    except ValueError:
+                        continue
+                    total = None
+                    for cand in (total_s, est_s):
+                        try:
+                            if cand not in ("NA", "None", ""):
+                                total = float(cand)
+                                break
+                        except ValueError:
+                            continue
+                    speed = speed if speed not in ("NA", "None") else None
+                    eta = eta if eta not in ("NA", "None") else None
+                    if done is not None and total:
+                        frac = max(0.0, min(1.0, done / total)) * 0.92
+                        rec.progress = frac
+                        pct = frac / 0.92 * 100
+                        rec.stage = f"Downloading {pct:.0f}% at {speed or '?'}" + (f", ETA {eta}s" if eta else "")
+                    elif done is not None:
+                        rec.progress = None
+                        mb = done / 1e6
+                        rec.stage = f"Downloading {mb:.1f} MB at {speed or '?'} (size unknown)"
+                    continue
+                m = _POST_RE.match(line)
+                if m:
+                    name, status = m.group(1) or "Post-processing", m.group(2) or ""
+                    rec.progress = max(rec.progress or 0, 0.93)
+                    rec.stage = f"Processing ({name}) {status}".strip()
+                    continue
+                if line and not line.startswith("[download]"):
+                    rec.add_log(line)
+
+        out_task = asyncio.create_task(pump_stdout())
+        err_task = asyncio.create_task(pump_stderr())
         try:
             await proc.wait()
-        except Exception:
-            pass
-        raise
-    finally:
-        if out_task:
-            out_task.cancel()
-        if err_task:
-            err_task.cancel()
-        for t in (out_task, err_task):
+        except asyncio.CancelledError:
+            # user cancellation -> hard kill, then re-raise. Reap the process
+            # afterwards: on Windows the .part file handle lingers until exit.
             try:
-                await t
-            except (asyncio.CancelledError, Exception):
+                proc.kill()
+            except Exception:
                 pass
-        rec.process = None
-        # cleanup partial files for cancelled/failed downloads
-        if rec.cancel_event.is_set() or proc.returncode != 0:
-            for pf in out_dir.glob("*.part"):
+            try:
+                await proc.wait()
+            except Exception:
+                pass
+            raise
+        finally:
+            if out_task:
+                out_task.cancel()
+            if err_task:
+                err_task.cancel()
+            for t in (out_task, err_task):
                 try:
-                    if pf.stat().st_mtime < started:
-                        continue
-                    for attempt in range(3):
-                        try:
-                            pf.unlink()
-                            break
-                        except PermissionError:
-                            await asyncio.sleep(0.05 * (attempt + 1))
-                except OSError:
+                    await t
+                except (asyncio.CancelledError, Exception):
                     pass
+            rec.process = None
+            # cleanup partial files for cancelled/failed downloads
+            if rec.cancel_event.is_set() or proc.returncode != 0:
+                for pf in out_dir.glob("*.part"):
+                    try:
+                        if pf.stat().st_mtime < started:
+                            continue
+                        for attempt in range(3):
+                            try:
+                                pf.unlink()
+                                break
+                            except PermissionError:
+                                await asyncio.sleep(0.05 * (attempt + 1))
+                    except OSError:
+                        pass
 
-    if rec.cancel_event.is_set():
-        raise TaskCancelled("Cancelled by user")
-    if proc.returncode != 0:
+        if rec.cancel_event.is_set():
+            raise TaskCancelled("Cancelled by user")
+        rc = proc.returncode or 0
+        if (rc != 0 and cookies and use_cookies and not retried_anonymous
+                and _session_challenged(stderr_tail)):
+            retried_anonymous = True
+            use_cookies = False
+            rec.add_log("YouTube challenged the saved sign-in - retrying without "
+                        "cookies (public content only)")
+            continue
+        break
+
+    if rc != 0:
         msg = _friendly(cfg, stderr_tail)
         if "sign-in" in msg and not cookie_args(cfg):
             msg += _BOT_TIP
         raise RuntimeError(msg)
 
     # locate produced file(s): newest matching file written since start
-    produced: list[Path] = []
     for p in out_dir.iterdir():
         if p.is_file() and p.stat().st_mtime >= started - 1 and not p.name.endswith(".part"):
             produced.append(p)
@@ -488,7 +538,9 @@ async def download_task(rec: TaskRecord, cfg: Config, params: dict) -> dict:
         "url": f"/api/download?path={quote(p.as_posix())}",
     } for p in produced[:1]]
     total_size = outputs[0]["size"]
-    rec.message = f"Saved {title} ({total_size / 1e6:.1f} MB)"
+    rec.message = (f"Saved {title} ({total_size / 1e6:.1f} MB)"
+                   + (" (fetched without sign-in)" if retried_anonymous else ""))
     return {"outputs": outputs,
             "info": {"title": title, "video_id": vid, "mode": mode,
-                     "duration_s": round(time.time() - started, 1)}}
+                     "duration_s": round(time.time() - started, 1),
+                     "signed_out_fallback": retried_anonymous}}

@@ -242,6 +242,16 @@ def test_download_cancel_cleans_part_files(media_server):
 
 
 # ------------------------------------------------------ TaskManager unit
+def test_session_challenged_detection():
+    assert media_service._session_challenged(
+        "ERROR: [youtube] abc: The page needs to be reloaded.")
+    assert media_service._session_challenged("ERROR: No video formats found!")
+    assert media_service._session_challenged(
+        "ERROR: Sign in to confirm you're not a bot.")
+    assert not media_service._session_challenged("ERROR: HTTP Error 404: Not Found")
+    assert not media_service._session_challenged("")
+
+
 def test_task_manager_cancel_and_temp_cleanup():
     async def go():
         cfg = _test_cfg("tm_cancel")

@@ -286,6 +286,7 @@ copyright law.
 | YouTube: "sign-in / bot verification" | Open the **Cookies / Sign-in** tab and add your YouTube cookies (export with "Get cookies.txt LOCALLY" while logged in), or use the browser-cookie mode |
 | Cookies: "Could not read your browser's cookie database" | Fully close that browser (all windows) and retry, or switch to paste-file mode |
 | Cookies were working, now failing | Cookie sessions expire — re-export fresh cookies while logged in to YouTube |
+| YouTube: "The page needs to be reloaded" | YouTube is challenging the saved sign-in session (known yt-dlp issue). The app automatically retries without cookies so public videos still work; for signed-in content, sign out of YouTube in your browser, sign back in, and re-export the cookies immediately after visiting YouTube |
 | "The video is unavailable" | The link is wrong, the video is private/region-locked, or deleted |
 | Port already in use | Change `port` in `config.json`, or `scripts\stop.bat 8756` first |
 | A PDF fails to open | It may be encrypted (password-protected PDFs are rejected with a clear message) |
