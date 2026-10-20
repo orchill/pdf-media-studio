@@ -137,8 +137,8 @@ class Config:
             d.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------- access
-    def get(self, key: str) -> Any:
-        return self._d[key]
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._d.get(key, default)
 
     def as_dict(self) -> dict[str, Any]:
         d = dict(self._d)
