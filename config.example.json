@@ -1,0 +1,16 @@
+{
+  "host": "127.0.0.1",
+  "port": 8756,
+  "output_dir": "outputs",
+  "data_dir": "data",
+  "ffmpeg_path": "",
+  "ytdlp_path": "",
+  "cookie_source": "none",
+  "cookie_browser": "",
+  "max_upload_mb": 512,
+  "max_download_gb": 2,
+  "max_duration_hours": 4,
+  "max_concurrent_tasks": 3,
+  "history_limit": 100,
+  "open_browser": true
+}
