@@ -11,7 +11,7 @@ def _tm(request: Request):
 
 
 @router.get("/tasks")
-async def list_tasks(limit: int = 50, status: str | None = None, kind: str | None = None):
+async def list_tasks(request: Request, limit: int = 50, status: str | None = None, kind: str | None = None):
     return _tm(request).list_tasks(limit=limit, status=status, kind=kind)
 
 
